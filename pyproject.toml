@@ -6,16 +6,22 @@ authors = [
     {name = "Gregor Lenz", email = "gregor.lenz@synsense.ai"},
 ]
 dependencies = [
-    "tonic>=1.2.2",
     "torch==1.12.1",
     "torchvision>=0.13.1",
-    "sinabs @ file:///${PROJECT_ROOT}/../sinabs",
+    "ipykernel>=6.17.0",
+    "tonic>=1.2.2",
 ]
 requires-python = ">=3.8"
 license = {text = "MIT"}
 dynamic = ["dependencies"]
+[project.optional-dependencies]
 
 [tool.pdm]
+[tool.pdm.dev-dependencies]
+dev = [
+    "sinabs @ file:///${PROJECT_ROOT}/../sinabs",
+    "sinabs-dynapcnn @ file:///${PROJECT_ROOT}/../sinabs-dynapcnn",
+]
 
 [build-system]
 requires = ["pdm-pep517>=1.0.0"]
