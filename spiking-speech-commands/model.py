@@ -2,22 +2,20 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 import pytorch_lightning as pl
-import sinabs.layers as sl
 import sinabs.activation as sa
 from typing import Dict, Any
 import sinabs
-from torch.nn.utils import weight_norm
-
+import torchmetrics
 
 class Memory(nn.Sequential):
     def __init__(self, encoding_dim, output_dim, kw_args, backend):
         super().__init__(
-            nn.Linear(encoding_dim, output_dim, bias=False),
+            nn.Linear(encoding_dim, output_dim),
             sinabs.exodus.layers.LIF(**kw_args) if backend == 'exodus' else sinabs.layers.LIF(**kw_args),
         )
 
 
-class ExodusNetwork(pl.LightningModule):
+class ExodusNet(pl.LightningModule):
     def __init__(
         self,
         tau_mem,
@@ -30,7 +28,6 @@ class ExodusNetwork(pl.LightningModule):
         learning_rate=1e-3,
         width_grad=1.,
         scale_grad=1.,
-        init_weights=None,
         backend='exodus',
         **kw_args,
     ):
@@ -54,18 +51,16 @@ class ExodusNetwork(pl.LightningModule):
                 Memory(hidden_dim, hidden_dim, kw_args, backend)
                 for i in range(n_hidden_layers)
             ],
-            nn.Linear(hidden_dim, output_dim, bias=False),
+            nn.Linear(hidden_dim, output_dim),
         )
 
-        if init_weights:
-            self.network[0][0].weight.data = init_weights['linear_input.weight'].squeeze()
-            for i in range(n_hidden_layers):
-                self.network[i+1][0].weight.data = init_weights[f'linear_hidden.{i}.weight'].squeeze()
-            self.network[-1].weight.data = init_weights['linear_output.weight'].squeeze()
+        self.accuracy_metric = torchmetrics.Accuracy(task='multiclass', num_classes=output_dim)
 
-        # self.activations = {}
-        # for layer in self.spiking_layers:
-        #     layer.register_forward_hook(self.save_activations)
+        self.decoder_dict = {
+            "sum_loss": lambda y_hat: y_hat.sum(1),
+            "max_over_time": lambda y_hat: y_hat.max(1)[0],
+            "last_ts": lambda y_hat: y_hat[:, -1],
+        }
 
     def forward(self, x):
         return self.network(x)
@@ -74,60 +69,40 @@ class ExodusNetwork(pl.LightningModule):
         self.activations[module] = output
 
     def training_step(self, batch, batch_idx):
-        self.reset_states()
+        sinabs.reset_states(self.network)
         x, y = batch  # x is Batch, Time, Channels
         y_hat = self(x)
-        # firing_rate = torch.cat(list(self.activations.values())).mean()
-        # self.log("firing_rate", firing_rate, prog_bar=True)
-        if self.hparams.decoding_func == "sum_loss":
-            y_decoded = y_hat.sum(1)
-        if self.hparams.decoding_func == "max_over_time":
-            y_decoded = y_hat.max(1)[0]
-        elif self.hparams.decoding_func == "last_ts":
-            y_decoded = y_hat[:, -1]
+        y_decoded = self.decoder_dict[self.hparams.decoding_func](y_hat)
         loss = F.cross_entropy(y_decoded, y)
         self.log("train_loss", loss)
         return loss
 
     def validation_step(self, batch, batch_idx):
-        self.reset_states()
+        sinabs.reset_states(self.network)
         x, y = batch  # x is Batch, Time, Channels
         y_hat = self(x)
-        if self.hparams.decoding_func == "sum_loss":
-            y_decoded = y_hat.sum(1)
-        if self.hparams.decoding_func == "max_over_time":
-            y_decoded = y_hat.max(1)[0]
-        elif self.hparams.decoding_func == "last_ts":
-            y_decoded = y_hat[:, -1]
+        y_decoded = self.decoder_dict[self.hparams.decoding_func](y_hat)
         loss = F.cross_entropy(y_decoded, y)
-        prediction = y_decoded.argmax(1)
         self.log("valid_loss", loss, prog_bar=True)
-        accuracy = (prediction == y).float().sum() / len(prediction)
+        prediction = y_decoded.argmax(1)
+        accuracy = self.accuracy_metric(prediction, y)
         self.log("valid_acc", accuracy, prog_bar=True)
 
+    def test_step(self, batch, batch_idx):
+        sinabs.reset_states(self.network)
+        x, y = batch  # x is Batch, Time, Channels
+        y_hat = self(x)
+        y_decoded = self.decoder_dict[self.hparams.decoding_func](y_hat)
+        prediction = y_decoded.argmax(1)
+        accuracy = self.accuracy_metric(prediction, y)
+        self.log("test_acc", accuracy, prog_bar=True)
+
+
     def configure_optimizers(self):
-        if self.hparams.optimizer == "adam":
-            return torch.optim.Adam(
-                self.parameters(),
-                lr=self.hparams.learning_rate,
-            )
-        elif self.hparams.optimizer == "sgd":
-            return torch.optim.SGD(
-                self.parameters(),
-                lr=self.hparams.learning_rate,
-            )
-
-    @property
-    def sinabs_layers(self):
-        return [
-            layer
-            for layer in self.network.modules()
-            if isinstance(layer, sl.StatefulLayer)
-        ]
-
-    def reset_states(self):
-        for layer in self.sinabs_layers:
-            layer.reset_states()
+        return torch.optim.Adam(
+            self.parameters(),
+            lr=self.hparams.learning_rate,
+        )
 
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
         for name, parameter in checkpoint["state_dict"].items():

@@ -1,3 +1,7 @@
+cache
+data
+metadata
+lightning_logs
 .pdm.toml
 
 # Byte-compiled / optimized / DLL files
